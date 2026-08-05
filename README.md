@@ -4,7 +4,7 @@
 > Search for keywords on live product webpages at scale.
 > Upload a file, start the job, download clean results.
 
-Sibling tool to the [PDF Keyword Search System](./README_pdf.md) — same
+Sibling tool to the [PDF Keyword Search System](./README.md) — same
 input/output conventions, same status schema, different engine: this tool
 targets **live JS-rendered product pages** (Siemens SiePortal, Festo, ifm,
 Phoenix Contact, Rittal, Danfoss, Mersen, etc.) instead of static PDFs.
