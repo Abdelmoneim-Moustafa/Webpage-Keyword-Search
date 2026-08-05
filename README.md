@@ -45,10 +45,9 @@ browser only for the pages that actually need JavaScript to render.
 
 ```
 webpage-keyword-search/
-├── streamlit_app.py       ← Streamlit application (primary interface)
-├── webpage_keyword_search.py       ← CLI version (Playwright, offline/scriptable)
+├── app.py       ← Streamlit application (primary interface)
 ├── webpage_keyword_search_gui.py   ← Desktop GUI version (Tkinter, packages to .exe)
-├── webpage_requirements.txt        ← Python dependencies
+├── requirements.txt        ← Python dependencies
 └── README.md                       ← This file
 ```
 
@@ -58,7 +57,6 @@ work:
 | Interface | Best for |
 |---|---|
 | **Streamlit app** | Day-to-day use, browser-based, matches the PDF tool's UI |
-| **CLI script** | Scheduled/automated runs, scripting into a larger pipeline |
 | **Desktop GUI (.exe)** | Handing the tool to someone without a Python setup |
 
 ---
@@ -81,12 +79,6 @@ streamlit run streamlit_app.py
 ```
 
 Opens at `http://localhost:8501`
-
-### Run the CLI version instead
-
-```bash
-python webpage_keyword_search.py input.xlsx output.xlsx --workers 4
-```
 
 ### Build the Desktop .exe
 
