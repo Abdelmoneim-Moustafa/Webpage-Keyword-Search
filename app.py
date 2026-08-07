@@ -168,8 +168,21 @@ def _safe_generic_expand(page, url, nav_timeout):
     """Best-effort click of any of GENERIC_EXPAND_TEXTS that's visible on
     the page. Guards against accidentally following a real navigation
     link instead of toggling an accordion — if a click changes the URL,
-    we treat it as a mistaken match and navigate straight back."""
-    original_url = page.url
+    we treat it as a mistaken match and navigate straight back.
+
+    FIX: "120 rows processed, Failed: 120" — a crashed/closed page (which
+    happens under load on the heaviest SPAs, e.g. many concurrent NXP/
+    Siemens tabs at once) made the page.url read below raise an
+    exception that NOTHING caught. That exception didn't just fail the
+    one row — it escaped playwright_fetch entirely and blew up the
+    surrounding batch loop in run_playwright_batch, which then marked
+    every REMAINING row in that worker's chunk as failed without even
+    attempting them. That's why failures showed up in large identical-
+    timestamp clusters instead of as individual, spread-out failures."""
+    try:
+        original_url = page.url
+    except Exception:
+        return
     for text in GENERIC_EXPAND_TEXTS:
         try:
             # Prefer things that look like accordion/tab controls over
@@ -322,7 +335,11 @@ def fast_fetch(url: str, timeout: int):
 # ══════════════════════════════════════════════════════════════════
 def playwright_fetch(context, url: str, timeout_ms: int):
     """Runs inside an already-open Playwright browser context.
-    Returns (text_or_None, category)."""
+    Returns (text_or_None, category). NEVER raises — every internal
+    step is guarded, because ANY uncaught exception here escapes into
+    the batch loop and cascades into failing every row still queued
+    behind it (see the "120 rows processed, Failed: 120" fix note on
+    _safe_generic_expand above for the full explanation)."""
     from playwright.sync_api import TimeoutError as PWTimeout
 
     _throttle_host(url)
@@ -331,9 +348,16 @@ def playwright_fetch(context, url: str, timeout_ms: int):
     nav_timeout = SLOW_HOST_NAV_TIMEOUT_MS if slow else timeout_ms
     settle_wait = SLOW_HOST_POST_LOAD_MS if slow else POST_LOAD_WAIT_MS
 
-    page = context.new_page()
     try:
-        page, err = _goto_with_retry(page, url, nav_timeout)
+        page = context.new_page()
+    except Exception:
+        return None, "exception"
+
+    try:
+        try:
+            page, err = _goto_with_retry(page, url, nav_timeout)
+        except Exception:
+            return None, "exception"
         if err == "timeout":
             return None, "timeout"
         if err == "exception" or page is None:
@@ -341,8 +365,9 @@ def playwright_fetch(context, url: str, timeout_ms: int):
 
         try:
             page.wait_for_load_state("networkidle", timeout=nav_timeout)
-        except PWTimeout:
-            pass  # some sites never go idle - continue anyway
+        except Exception:
+            pass  # some sites never go idle (or this isn't a plain
+                   # timeout) - continue anyway, we still have a page
 
         for sel in expand_selectors_for(url):
             try:
@@ -353,10 +378,16 @@ def playwright_fetch(context, url: str, timeout_ms: int):
             except Exception:
                 pass
 
-        _safe_generic_expand(page, url, nav_timeout)
+        try:
+            _safe_generic_expand(page, url, nav_timeout)
+        except Exception:
+            pass
 
-        page.wait_for_timeout(settle_wait)
-        text = page.evaluate("document.body ? document.body.innerText : ''") or ""
+        try:
+            page.wait_for_timeout(settle_wait)
+            text = page.evaluate("document.body ? document.body.innerText : ''") or ""
+        except Exception:
+            return None, "exception"
         category = classify_text(text)
 
         # FIX: NXP (and similar) intermittently return a genuine
@@ -366,24 +397,39 @@ def playwright_fetch(context, url: str, timeout_ms: int):
         # fresh page, resolves most of these instead of reporting a
         # real vendor's page as permanently Blocked.
         if category == "blocked":
-            page.wait_for_timeout(1500)
-            retry_page = context.new_page()
             try:
-                retry_page.goto(url, timeout=nav_timeout, wait_until="domcontentloaded")
-                retry_page.wait_for_load_state("networkidle", timeout=nav_timeout)
+                page.wait_for_timeout(1500)
+                retry_page = context.new_page()
+                try:
+                    retry_page.goto(url, timeout=nav_timeout, wait_until="domcontentloaded")
+                    retry_page.wait_for_load_state("networkidle", timeout=nav_timeout)
+                except Exception:
+                    pass
+                try:
+                    _safe_generic_expand(retry_page, url, nav_timeout)
+                except Exception:
+                    pass
+                retry_page.wait_for_timeout(settle_wait)
+                retry_text = retry_page.evaluate("document.body ? document.body.innerText : ''") or ""
+                retry_page.close()
+                retry_category = classify_text(retry_text)
+                if retry_category != "blocked":
+                    return retry_text, retry_category
             except Exception:
-                pass
-            _safe_generic_expand(retry_page, url, nav_timeout)
-            retry_page.wait_for_timeout(settle_wait)
-            retry_text = retry_page.evaluate("document.body ? document.body.innerText : ''") or ""
-            retry_page.close()
-            retry_category = classify_text(retry_text)
-            if retry_category != "blocked":
-                return retry_text, retry_category
+                pass  # retry attempt itself failed - fall through and
+                      # report the original (blocked) result below
 
         return text, category
+    except Exception:
+        # Final safety net - should be unreachable given the guards
+        # above, but a row failing on its own beats the whole batch
+        # failing behind it.
+        return None, "exception"
     finally:
-        page.close()
+        try:
+            page.close()
+        except Exception:
+            pass
 
 
 def _goto_with_retry(page, url, nav_timeout):
@@ -472,8 +518,17 @@ def run_playwright_batch(rows_subset, case_sensitive, timeout_ms, on_row_done, s
             for row in rows_subset:
                 if stop_event is not None and stop_event.is_set():
                     break
-                text, cat = playwright_fetch(context, row["URL"], timeout_ms)
-                res = finalize_row(row, text, cat, case_sensitive, engine="Rendered (Browser)")
+                try:
+                    text, cat = playwright_fetch(context, row["URL"], timeout_ms)
+                    res = finalize_row(row, text, cat, case_sensitive, engine="Rendered (Browser)")
+                except Exception as e:
+                    # Defense in depth: playwright_fetch is guarded to
+                    # never raise, but if something still slips through
+                    # (or finalize_row itself hits something unexpected),
+                    # fail only THIS row instead of aborting everything
+                    # still queued behind it in this worker's chunk.
+                    res = finalize_row(row, None, "exception", case_sensitive,
+                                        engine="Rendered (Browser)", note=f"Row error: {e}")
                 processed_urls.add(str(row["URL"]))
                 results.append(res)
                 on_row_done(res)
