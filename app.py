@@ -134,6 +134,37 @@ SNIPPET_RADIUS = 60
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
+# FIX: "All Siemens take block" — best available hypothesis pending real
+# evidence (see the diagnostic snippet added to finalize_row below): EU
+# corporate sites frequently gate real content behind a cookie-consent
+# wall, and an unaccepted consent banner can look a lot like a bot block
+# (short page, generic "access"/"denied" style legal text) without being
+# one. Tried early, before anything else, on both the first page and the
+# blocked-retry page. This is a real possibility, not a confirmed fix —
+# the Notes column will now show what page we actually saw so this can
+# be corrected with real evidence instead of another guess.
+COOKIE_CONSENT_TEXTS = [
+    "Accept all", "Accept All Cookies", "Accept Cookies", "Accept",
+    "I agree", "I Agree", "Agree and continue", "Allow all", "Allow All",
+    "Got it", "Zustimmen", "Alle akzeptieren", "Alle Cookies akzeptieren",
+]
+
+
+def _dismiss_cookie_consent(page):
+    for text in COOKIE_CONSENT_TEXTS:
+        try:
+            loc = page.locator(
+                f"button:has-text('{text}'), [role=button]:has-text('{text}')"
+            ).first
+            if loc.is_visible(timeout=500):
+                loc.click(timeout=800)
+                page.wait_for_timeout(400)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 EXPAND_SELECTORS_BY_HOST = {
     "phoenixcontact.com": ["text=Expand all", "button:has-text('Expand all')"],
     "festo.com":          ["button:has-text('Show more')", "text=Show all"],
@@ -369,6 +400,11 @@ def playwright_fetch(context, url: str, timeout_ms: int):
             pass  # some sites never go idle (or this isn't a plain
                    # timeout) - continue anyway, we still have a page
 
+        try:
+            _dismiss_cookie_consent(page)
+        except Exception:
+            pass
+
         for sel in expand_selectors_for(url):
             try:
                 loc = page.locator(sel).first
@@ -398,11 +434,15 @@ def playwright_fetch(context, url: str, timeout_ms: int):
         # real vendor's page as permanently Blocked.
         if category == "blocked":
             try:
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(3000)
                 retry_page = context.new_page()
                 try:
                     retry_page.goto(url, timeout=nav_timeout, wait_until="domcontentloaded")
                     retry_page.wait_for_load_state("networkidle", timeout=nav_timeout)
+                except Exception:
+                    pass
+                try:
+                    _dismiss_cookie_consent(retry_page)
                 except Exception:
                     pass
                 try:
@@ -415,6 +455,10 @@ def playwright_fetch(context, url: str, timeout_ms: int):
                 retry_category = classify_text(retry_text)
                 if retry_category != "blocked":
                     return retry_text, retry_category
+                # Still blocked after the retry too - keep whichever
+                # snippet is more informative for the diagnostic below.
+                if len(retry_text.strip()) > len(text.strip()):
+                    text = retry_text
             except Exception:
                 pass  # retry attempt itself failed - fall through and
                       # report the original (blocked) result below
@@ -626,7 +670,16 @@ def finalize_row(row, text, category, case_sensitive, engine, note=""):
                     Keyword_Search_Status=S.FAILED)
 
     if category == "blocked":
-        return done(URL_Status=0, URL_Search_Status="Blocked by site",
+        # FIX: "All Siemens take block" — reported with no way to see
+        # WHY the tool called it blocked. Rather than guess again, show
+        # the actual page text that triggered the classification (first
+        # ~200 chars, cleaned up) directly in the output, so this can be
+        # diagnosed from real evidence next time instead of another
+        # hypothesis. If it turns out to be a cookie-consent wall or
+        # something else entirely, this snippet will show it.
+        diag = (text or "").strip().replace("\n", " ")[:200]
+        return done(URL_Status=0,
+                    URL_Search_Status=f"Blocked by site — page showed: \"{diag}\"" if diag else "Blocked by site",
                     Keyword_Search_Status=S.BLOCKED)
 
     if category in ("js_placeholder", "too_short"):
