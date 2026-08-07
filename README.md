@@ -16,9 +16,9 @@ vendor sites) instead of static PDFs.
 
 ```
 webpage-keyword-search/
-├── streamlit_app.py                ← Streamlit app — single file, no other project file needed
+├── app.py                ← Streamlit app — single file, no other project file needed
 ├── webpage_keyword_search_gui.py   ← Desktop GUI (Tkinter) — single file, packages to .exe
-├── webpage_requirements.txt
+├── requirements.txt
 └── README.md                       ← this file
 ```
 
@@ -38,13 +38,13 @@ than once — worth knowing if you're maintaining this yourself.
 ## 🚀 Setup
 
 ```bash
-pip install -r webpage_requirements.txt
+pip install -r requirements.txt
 playwright install chromium     # one-time, downloads the headless browser
 ```
 
 **Run the Streamlit app:**
 ```bash
-streamlit run streamlit_app.py
+streamlit run app.py
 ```
 Opens at `http://localhost:8501`
 
@@ -107,10 +107,10 @@ Excel (.xlsx) or CSV with exactly these two columns:
 
 **Why 403/404 get a second chance:** several vendors (NXP, Ruland, and
 likely others) return a 403 or 404 to plain non-browser HTTP requests
-as an anti-bot measure, even though the exact same URL loads a
+as an anti-bot measure, even though the same URL loads a
 completely real page in an actual browser. A genuine "this part doesn't
 exist" 404 looks identical at the HTTP level, so rather than guess, the
-tool lets the browser pass make the real call.
+tool lets the browser make the real call.
 
 ### Known slow / JS-only sites
 Currently: `abb.com`, `siemens.com`, `sieportal.siemens.com`, `nxp.com`,
@@ -133,7 +133,7 @@ different problems that look similar and need different fixes:
   apart from the outside, so if NXP rows keep failing across multiple
   full runs (not just within one), that's more likely the second case.
 
-### Tab / accordion handling
+### Tab/accordion handling
 Many vendors hide the compliance/customs data behind a collapsed
 section — the label varies (Murrelektronik: "Commercial data",
 Phoenix Contact: "Commercial & Classifications data", Renesas: "product
@@ -142,7 +142,7 @@ vendor, the tool tries a broad list of the common label patterns on
 every page — cheap to attempt, safely skipped where a label doesn't
 exist. If a vendor's data still comes back "Needs Review" or "Not
 Found" and you can see it in the actual page under a differently
-labeled tab, tell me the label and I'll add it.
+labeled tab, tell me the label, and I'll add it.
 
 **Honest limitation:** I can't run this against the real vendor sites
 from my side to verify every selector fires correctly — I based the
