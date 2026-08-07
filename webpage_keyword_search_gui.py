@@ -108,9 +108,14 @@ OUTPUT_COLUMNS = [
 # where we also give them extra time to finish rendering.
 KNOWN_SLOW_HOSTS = [
     "abb.com", "siemens.com", "sieportal.siemens.com", "nxp.com",
+    "murrelektronik.com", "hms-networks.com",
 ]
-SLOW_HOST_NAV_TIMEOUT_MS   = 45000   # vs 30000 default
-SLOW_HOST_POST_LOAD_MS     = 5000    # vs 2000 default extra settle time
+# FIX: "ABB, NXP, and Siemens need time... need like 5 to 6 seconds" —
+# even the earlier extended timeout wasn't always enough; bumped further,
+# and (see _goto_with_retry below) a plain timeout on these hosts now
+# gets one more patient retry instead of failing immediately.
+SLOW_HOST_NAV_TIMEOUT_MS   = 60000   # vs 35000 default
+SLOW_HOST_POST_LOAD_MS     = 7000    # vs 2500 default extra settle time
 
 # ── Tunables ─────────────────────────────────────────────────────────
 _MIN_USEFUL_CHARS = 400
@@ -145,8 +150,8 @@ EXPAND_SELECTORS_BY_HOST = {
     "festo.com":          ["button:has-text('Show more')", "text=Show all"],
     "murrelektronik.com": ["text=Commercial data", "text=Technical Data", "text=Connection data"],
 }
-NAV_TIMEOUT_MS    = 30000
-POST_LOAD_WAIT_MS = 2000
+NAV_TIMEOUT_MS    = 35000
+POST_LOAD_WAIT_MS = 2500
 
 # FIX: "Some links need to open tabs, like the Commercial data tab" —
 # per the vendor reference sheet, most of these European industrial
@@ -224,17 +229,32 @@ def expand_selectors_for(url: str):
 _host_last_request = {}
 _host_throttle_lock = threading.Lock()
 _MIN_HOST_GAP_SECONDS = 0.6
+# FIX: "sometimes NXP blocks the IP" — a flat 0.6s gap wasn't enough to
+# stay under NXP's rate-limit threshold specifically. Give known
+# rate-sensitive hosts a bigger enforced gap between requests. This
+# can't fix a genuine IP-level ban if one has already happened (no
+# amount of client-side pacing gets around that — that needs waiting it
+# out, or spacing large NXP batches across separate runs), but it
+# reduces the odds of triggering one in the first place.
+_HOST_MIN_GAP_OVERRIDE = {
+    "nxp.com": 2.5,
+}
 
 
 def _throttle_host(url):
     import time as _time
     host = host_of(url)
+    gap = _MIN_HOST_GAP_SECONDS
+    for h, g in _HOST_MIN_GAP_OVERRIDE.items():
+        if h in host:
+            gap = g
+            break
     with _host_throttle_lock:
         last = _host_last_request.get(host)
         now = _time.time()
         wait = 0.0
         if last is not None:
-            wait = _MIN_HOST_GAP_SECONDS - (now - last)
+            wait = gap - (now - last)
         _host_last_request[host] = now + max(wait, 0.0)
     if wait > 0:
         _time.sleep(wait)
@@ -378,29 +398,46 @@ def playwright_fetch(context, url: str, timeout_ms: int):
 
 
 def _goto_with_retry(page, url, nav_timeout):
-    """FIX: ABB (new.abb.com) intermittently throws
-    net::ERR_HTTP2_PROTOCOL_ERROR on the first navigation attempt — not a
-    timeout, so the old code gave up immediately and logged 'Failed to
-    load page' even though the site itself was fine. This is a known
-    Chromium/HTTP2 quirk on some sites. One retry with a fresh page
-    almost always succeeds, so we do that before giving up for real."""
+    """FIX: several sites (ABB especially, but also seen on Murrelektronik
+    and HMS Networks URLs) fail the FIRST navigation attempt for reasons
+    that aren't necessarily a real problem — an HTTP/2 protocol quirk, a
+    slow first response, a transient timeout. The old code only retried
+    the specific ERR_HTTP2_PROTOCOL_ERROR case and gave up immediately on
+    anything else (including a plain timeout), which is too eager to
+    call a real, working page 'Failed to load'. Now ANY navigation
+    problem — timeout included — gets one more patient attempt on a
+    fresh page with a longer timeout and the more lenient wait_until
+    before it's treated as a genuine failure."""
     from playwright.sync_api import TimeoutError as PWTimeout
+
+    def _attempt(pg, timeout, wait_until):
+        try:
+            pg.goto(url, timeout=timeout, wait_until=wait_until)
+            return pg, None
+        except PWTimeout:
+            return pg, "timeout"
+        except Exception as e:
+            return pg, str(e)
+
+    result_page, err = _attempt(page, nav_timeout, "domcontentloaded")
+    if err is None:
+        return result_page, None
+
+    # First attempt failed (timeout OR any exception, e.g. ERR_HTTP2) —
+    # one more try, fresh page, more time, more lenient wait condition.
     try:
-        page.goto(url, timeout=nav_timeout, wait_until="domcontentloaded")
-        return page, None
+        context = page.context
+        try:
+            page.close()
+        except Exception:
+            pass
+        retry_page = context.new_page()
+        retry_page.goto(url, timeout=int(nav_timeout * 1.5), wait_until="load")
+        return retry_page, None
     except PWTimeout:
-        return page, "timeout"
-    except Exception as e:
-        if "ERR_HTTP2_PROTOCOL_ERROR" in str(e) or "ERR_HTTP2" in str(e):
-            try:
-                context = page.context
-                page.close()
-                retry_page = context.new_page()
-                retry_page.goto(url, timeout=nav_timeout, wait_until="load")
-                return retry_page, None
-            except Exception:
-                return None, "exception"
-        return page, "exception"
+        return None, "timeout"
+    except Exception:
+        return None, "exception"
 
 
 def run_playwright_batch(rows_subset, case_sensitive, timeout_ms, on_row_done, stop_event=None):

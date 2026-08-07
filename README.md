@@ -1,4 +1,4 @@
-# 🌐 Webpage Keyword Search — v1.2
+# 🌐 Webpage Keyword Search — v1.3
 
 > **Fast · Resilient · 5-Status Output**
 > Search for keywords on live product webpages at scale.
@@ -6,9 +6,9 @@
 
 Sibling tool to the PDF Keyword Search System — same input/output
 conventions, same status schema — built for **live, JS-rendered product
-pages** (NXP, Siemens, ABB, Ruland, Murrelektronik, HARTING, Phoenix
-Contact, Festo, ifm, Rittal, Danfoss, and similar vendor sites) instead
-of static PDFs.
+pages** (NXP, Siemens, ABB, Ruland, Murrelektronik, HMS Networks,
+HARTING, Phoenix Contact, Festo, ifm, Rittal, Danfoss, and similar
+vendor sites) instead of static PDFs.
 
 ---
 
@@ -16,9 +16,9 @@ of static PDFs.
 
 ```
 webpage-keyword-search/
-├── app.py                ← Streamlit app — single file, no other project file needed
+├── streamlit_app.py                ← Streamlit app — single file, no other project file needed
 ├── webpage_keyword_search_gui.py   ← Desktop GUI (Tkinter) — single file, packages to .exe
-├── requirements.txt
+├── webpage_requirements.txt
 └── README.md                       ← this file
 ```
 
@@ -38,13 +38,13 @@ than once — worth knowing if you're maintaining this yourself.
 ## 🚀 Setup
 
 ```bash
-pip install -r requirements.txt
+pip install -r webpage_requirements.txt
 playwright install chromium     # one-time, downloads the headless browser
 ```
 
 **Run the Streamlit app:**
 ```bash
-streamlit run app.py
+streamlit run streamlit_app.py
 ```
 Opens at `http://localhost:8501`
 
@@ -102,21 +102,38 @@ Excel (.xlsx) or CSV with exactly these two columns:
    │  data, Specifications, Classifications, Product details, ...)
    ├─ retries once automatically on an HTTP/2 protocol error (hit ABB)
    ├─ retries once on a "Blocked" result after a short pause (hit NXP)
-   └─ searches the rendered text, done → "Rendered (Browser)."
+   └─ searches the rendered text, done → "Rendered (Browser)"
 ```
 
 **Why 403/404 get a second chance:** several vendors (NXP, Ruland, and
 likely others) return a 403 or 404 to plain non-browser HTTP requests
-as an anti-bot measure, even though the same URL loads a
+as an anti-bot measure, even though the exact same URL loads a
 completely real page in an actual browser. A genuine "this part doesn't
 exist" 404 looks identical at the HTTP level, so rather than guess, the
-tool lets the browser make the real call.
+tool lets the browser pass make the real call.
 
 ### Known slow / JS-only sites
-Currently: `abb.com`, `siemens.com`, `sieportal.siemens.com`, `nxp.com`.
-Tell me if another vendor turns out to need this too — it's a one-line addition.
+Currently: `abb.com`, `siemens.com`, `sieportal.siemens.com`, `nxp.com`,
+`murrelektronik.com`, `hms-networks.com`. These skip the fast pass
+entirely and get a longer timeout (60s nav / 7s settle) plus a second,
+more patient retry attempt if the first navigation fails for *any*
+reason — not just the HTTP/2 protocol quirk that specifically hit ABB.
+Tell me if another vendor needs this treatment too — it's a one-line addition.
 
-### Tab/accordion handling
+**On NXP specifically ("sometimes NXP blocks the IP"):** there are two
+different problems that look similar and need different fixes:
+- *Per-request bot scoring* (same URL blocked once, fine moments later)
+  — this is what the retry-on-Blocked logic and the per-host request
+  spacing target, and NXP now gets a longer gap (2.5s) between requests
+  than other sites specifically because of this.
+- *A genuine IP-level block/ban* — if this has actually happened, no
+  amount of client-side pacing or retrying fixes it from inside a
+  single run; it needs waiting out, or running NXP-heavy batches later
+  /  in smaller batches spread over time. The tool can't tell these two
+  apart from the outside, so if NXP rows keep failing across multiple
+  full runs (not just within one), that's more likely the second case.
+
+### Tab / accordion handling
 Many vendors hide the compliance/customs data behind a collapsed
 section — the label varies (Murrelektronik: "Commercial data",
 Phoenix Contact: "Commercial & Classifications data", Renesas: "product
